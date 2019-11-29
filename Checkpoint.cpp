@@ -20,8 +20,23 @@
  * THE SOFTWARE.
  */
 
+#include <algorithm>
+#include <map>
+
 #include "bzfsAPI.h"
-#include "plugin_utils.h"
+
+// Define plug-in name
+const std::string PLUGIN_NAME = "Checkpoint";
+
+// Define plug-in version numbering
+const int MAJOR = 1;
+const int MINOR = 0;
+const int REV = 0;
+const int BUILD = 2;
+const std::string SUFFIX = "DEV";
+
+// Define build settings
+const int VERBOSITY_LEVEL = 4;
 
 class CheckpointZone : public bz_CustomZoneObject
 {
@@ -31,37 +46,60 @@ public:
     }
 
     std::string name_value;
-    bz_eTeamType team_value;
     std::string message_value;
+    bz_eTeamType team_value = eNoTeam;
 };
 
 class Checkpoint : public bz_Plugin, public bz_CustomSlashCommandHandler, public bz_CustomMapObjectHandler
 {
 public:
-    virtual const char* Name();
-    virtual void Init(const char* config);
-    virtual void Cleanup();
-    virtual void Event(bz_EventData* eventData);
-    virtual bool SlashCommand(int playerID, bz_ApiString command, bz_ApiString /*message*/, bz_APIStringList *params);
-    virtual bool MapObject(bz_ApiString object, bz_CustomMapObjectInfo* data);
+    const char* Name();
+    void Init(const char* config);
+    void Cleanup();
+    void Event(bz_EventData* eventData);
+    bool SlashCommand(int playerID, bz_ApiString command, bz_ApiString /*message*/, bz_APIStringList *params);
+    bool MapObject(bz_ApiString object, bz_CustomMapObjectInfo* data);
+
+private:
+    std::map<std::string, CheckpointZone> checkpointZones;
+    std::map<std::string, std::vector<CheckpointZone*>> savedCheckpoints;
+    std::map<int, std::vector<CheckpointZone*>> checkpoints;
+
+    const char* bzdb_checkPointsLifetime = "_checkPointsLifetime";
+    const char* bzdb_clearCheckPointsOnCap = "_clearCheckPointsOnCap";
 };
 
 BZ_PLUGIN(Checkpoint)
 
 const char* Checkpoint::Name()
 {
-    return "Checkpoint";
+    static const char *pluginBuild;
+
+    if (!pluginBuild)
+    {
+        pluginBuild = bz_format("%s %d.%d.%d (%d)", PLUGIN_NAME.c_str(), MAJOR, MINOR, REV, BUILD);
+
+        if (!SUFFIX.empty())
+        {
+            pluginBuild = bz_format("%s - %s", pluginBuild, SUFFIX.c_str());
+        }
+    }
+
+    return pluginBuild;
 }
 
-void Checkpoint::Init(const char* config)
+void Checkpoint::Init(const char* /*config*/)
 {
     Register(bz_eCaptureEvent);
+    Register(bz_eGetPlayerSpawnPosEvent);
     Register(bz_ePlayerJoinEvent);
+    Register(bz_ePlayerPartEvent);
     Register(bz_ePlayerUpdateEvent);
 
     bz_registerCustomSlashCommand("checkpoints", this);
 
-    bz_registerCustomBZDBBool("_clearCheckPointsOnCap", false, 0, false);
+    bz_registerCustomBZDBInt(bzdb_checkPointsLifetime, 60, 0, false);
+    bz_registerCustomBZDBBool(bzdb_clearCheckPointsOnCap, false, 0, false);
 
     bz_registerCustomMapObject("CHECKPOINT", this);
 }
@@ -74,7 +112,8 @@ void Checkpoint::Cleanup()
 
     bz_removeCustomMapObject("checkpoint");
 
-    bz_removeCustomBZDBVariable("_clearCheckPointsOnCap");
+    bz_removeCustomBZDBVariable(bzdb_checkPointsLifetime);
+    bz_removeCustomBZDBVariable(bzdb_clearCheckPointsOnCap);
 }
 
 void Checkpoint::Event(bz_EventData* eventData)
@@ -83,45 +122,106 @@ void Checkpoint::Event(bz_EventData* eventData)
     {
         case bz_eCaptureEvent:
         {
-            // This event is called each time a team's flag has been captured
-            bz_CTFCaptureEventData_V1* data = (bz_CTFCaptureEventData_V1*)eventData;
+            if (bz_getBZDBBool(bzdb_clearCheckPointsOnCap))
+            {
+                savedCheckpoints.clear();
+                checkpoints.clear();
+            }
+        }
+        break;
 
-            // Data
-            // ----
-            // (bz_eTeamType) teamCapped    - The team whose flag was captured.
-            // (bz_eTeamType) teamCapping   - The team who did the capturing.
-            // (int)          playerCapping - The player who captured the flag.
-            // (float[3])     pos           - The world position(X,Y,Z) where the flag has been captured
-            // (float)        rot           - The rotational orientation of the capturing player
-            // (double)       eventTime     - This value is the local server time of the event.
+        case bz_eGetPlayerSpawnPosEvent:
+        {
+            bz_GetPlayerSpawnPosEventData_V1* data = (bz_GetPlayerSpawnPosEventData_V1*)eventData;
+
+            if (checkpoints[data->playerID].size() == 0)
+            {
+                return;
+            }
+
+            CheckpointZone* zone = checkpoints[data->playerID].at(checkpoints[data->playerID].size() - 1);
+
+            if (!zone)
+            {
+                return;
+            }
+
+            float pos[3];
+            bz_getSpawnPointWithin(zone, pos);
+
+            data->handled = true;
+            data->pos[0] = pos[0];
+            data->pos[1] = pos[1];
+            data->pos[2] = pos[2] + 0.001f; // Fudge the Z-value to avoid stickiness on objects
         }
         break;
 
         case bz_ePlayerJoinEvent:
         {
-            // This event is called each time a player joins the game
+            bz_PlayerJoinPartEventData_V1* data = (bz_PlayerJoinPartEventData_V1*)eventData;
+            bz_ApiString bzid = data->record->bzID;
+
+            // Only restore a player's last Checkpoint if they're registered
+            if (data->record->verified)
+            {
+                unsigned long index = savedCheckpoints[bzid].size();
+
+                if (index == 0) {
+                    return;
+                }
+
+                checkpoints[data->playerID] = savedCheckpoints[bzid];
+            }
+        }
+        break;
+
+        case bz_ePlayerPartEvent:
+        {
             bz_PlayerJoinPartEventData_V1* data = (bz_PlayerJoinPartEventData_V1*)eventData;
 
-            // Data
-            // ----
-            // (int)                  playerID  - The player ID that is joining
-            // (bz_BasePlayerRecord*) record    - The player record for the joining player
-            // (double)               eventTime - Time of event.
+            if (data->record->verified)
+            {
+                savedCheckpoints[data->record->bzID] = checkpoints[data->playerID];
+            }
+
+            checkpoints.erase(data->playerID);
         }
         break;
 
         case bz_ePlayerUpdateEvent:
         {
-            // This event is called each time a player sends an update to the server
             bz_PlayerUpdateEventData_V1* data = (bz_PlayerUpdateEventData_V1*)eventData;
 
-            // Data
-            // ----
-            // (int)                  playerID  - ID of the player that sent the update
-            // (bz_PlayerUpdateState) state     - The original state the tank was in
-            // (bz_PlayerUpdateState) lastState - The second state the tank is currently in to show there was an update
-            // (double)               stateTime - The time the state was updated
-            // (double)               eventTime - The current server time
+            for (auto &zone : checkpointZones)
+            {
+                auto &myCheckpoints = checkpoints[data->playerID];
+
+                if (std::count(myCheckpoints.begin(), myCheckpoints.end(), &zone.second))
+                {
+                    continue;
+                }
+
+                if (zone.second.pointInZone(data->state.pos))
+                {
+                    bz_BasePlayerRecord *pr = bz_getPlayerByIndex(data->playerID);
+
+                    // If a Checkpoint is intended only for a team
+                    if (zone.second.team_value != eNoTeam && pr->team != zone.second.team_value)
+                    {
+                        continue;
+                    }
+
+                    checkpoints[data->playerID].push_back(&zone.second);
+
+                    if (!zone.second.message_value.empty())
+                    {
+                        bz_sendTextMessagef(BZ_SERVER, data->playerID, zone.second.message_value.c_str());
+                    }
+
+                    bz_freePlayerRecord(pr);
+                    break;
+                }
+            }
         }
         break;
 
@@ -134,6 +234,17 @@ bool Checkpoint::SlashCommand(int playerID, bz_ApiString command, bz_ApiString /
 {
     if (command == "checkpoints")
     {
+        auto &myCheckpoints = checkpoints[playerID];
+
+        int max = std::min(10, (int)myCheckpoints.size());
+
+        bz_sendTextMessagef(BZ_SERVER, playerID, "Your Checkpoints");
+        bz_sendTextMessagef(BZ_SERVER, playerID, "----------------");
+
+        for (int i = 0; i < max; ++i)
+        {
+            bz_sendTextMessagef(BZ_SERVER, playerID, "  - %s", myCheckpoints.at(myCheckpoints.size() - 1 - i)->name_value.c_str());
+        }
 
         return true;
     }
@@ -178,7 +289,14 @@ bool Checkpoint::MapObject(bz_ApiString object, bz_CustomMapObjectInfo* data)
         }
     }
 
-    // @TODO Save your custom map objects to your class
+    if (checkpointZones.find(checkpointZone.name_value) == checkpointZones.end())
+    {
+        checkpointZones[checkpointZone.name_value] = checkpointZone;
+    }
+    else
+    {
+        bz_debugMessagef(0, "ERROR :: Checkpoint :: A checkpoint with the name \"%s\" already exists.", checkpointZone.name_value.c_str());
+    }
 
     return true;
 }
