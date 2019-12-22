@@ -78,7 +78,7 @@ private:
         float azimuth = 0;
 
         /// The saved position within this checkpoint
-        std::map<CheckpointZone*, float*> savedPositions;
+        std::map<CheckpointZone*, bz_APIFloatList*> savedPositions;
     };
 
     /// A map to save checkpoint records between player joins indexed by BZID
@@ -129,6 +129,14 @@ void Checkpoint::Init(const char* /*config*/)
 
 void Checkpoint::Cleanup()
 {
+    for (auto &record : savedCheckpoints)
+    {
+        for (auto &save : record.second.savedPositions)
+        {
+            bz_deleteFloatList(save.second);
+        }
+    }
+
     Flush();
 
     bz_removeCustomSlashCommand("checkpoints");
@@ -171,11 +179,11 @@ void Checkpoint::Event(bz_EventData* eventData)
 
             // If there's an explicitly saved position in this checkpoint, use it. Otherwise, pick a random spawn
             // position within the zone each time.
-            if (record->savedPositions[zone])
+            if (record->savedPositions[zone]->size() > 0)
             {
-                pos[0] = record->savedPositions[zone][0];
-                pos[1] = record->savedPositions[zone][1];
-                pos[2] = record->savedPositions[zone][2];
+                pos[0] = record->savedPositions[zone]->get(0);
+                pos[1] = record->savedPositions[zone]->get(1);
+                pos[2] = record->savedPositions[zone]->get(2);
             }
             else
             {
@@ -239,10 +247,9 @@ void Checkpoint::Event(bz_EventData* eventData)
             {
                 auto &myCheckpoints = checkpoints[data->playerID].checkpoints;
 
-                // If they're inside a checkpoint they're already been in before, don't do anything
                 if (std::count(myCheckpoints.begin(), myCheckpoints.end(), &zone.second))
                 {
-                    break;
+                    continue;
                 }
 
                 // They're now inside a checkpoint they're never been in
@@ -259,6 +266,7 @@ void Checkpoint::Event(bz_EventData* eventData)
                     checkpoints[data->playerID].checkpoints.push_back(&zone.second);
                     checkpoints[data->playerID].currentCheckpoint = &zone.second;
                     checkpoints[data->playerID].azimuth = data->state.rotation;
+                    checkpoints[data->playerID].savedPositions[&zone.second] = bz_newFloatList();
 
                     if (!zone.second.message_value.empty())
                     {
@@ -281,6 +289,12 @@ bool Checkpoint::SlashCommand(int playerID, bz_ApiString command, bz_ApiString /
 {
     if (command == "checkpoints" || command == "cp")
     {
+        if (params->size() == 0)
+        {
+            bz_sendTextMessagef(BZ_SERVER, playerID, "Syntax: /%s <list|save|swap>", command.c_str());
+            return true;
+        }
+
         auto &playerCPs = checkpoints[playerID].checkpoints;
 
         if (params->get(0) == "list")
@@ -297,7 +311,7 @@ bool Checkpoint::SlashCommand(int playerID, bz_ApiString command, bz_ApiString /
                 CheckpointZone* cp = playerCPs.at(playerCPs.size() - 1 - i);
                 bool isSelected = (cp == checkpoints[playerID].currentCheckpoint);
 
-                bz_sendTextMessagef(BZ_SERVER, playerID, "  %s %s", cp->name_value.c_str(), isSelected ? "*" : "-");
+                bz_sendTextMessagef(BZ_SERVER, playerID, "  %s %s", isSelected ? "*" : "-", cp->name_value.c_str());
             }
         }
         else if (params->get(0) == "save")
@@ -315,9 +329,10 @@ bool Checkpoint::SlashCommand(int playerID, bz_ApiString command, bz_ApiString /
             {
                 if (zone->pointInZone(currPos))
                 {
-                    checkpoints[playerID].savedPositions[zone][0] = currPos[0];
-                    checkpoints[playerID].savedPositions[zone][1] = currPos[1];
-                    checkpoints[playerID].savedPositions[zone][2] = currPos[2];
+                    checkpoints[playerID].savedPositions[zone]->clear();
+                    checkpoints[playerID].savedPositions[zone]->push_back(currPos[0]);
+                    checkpoints[playerID].savedPositions[zone]->push_back(currPos[1]);
+                    checkpoints[playerID].savedPositions[zone]->push_back(currPos[2]);
                     checkpoints[playerID].azimuth = pr->lastKnownState.rotation;
 
                     bz_sendTextMessagef(BZ_SERVER, playerID, "You have changed your default spawn location:");
