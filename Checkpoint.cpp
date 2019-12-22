@@ -61,9 +61,31 @@ public:
     bool MapObject(bz_ApiString object, bz_CustomMapObjectInfo* data);
 
 private:
-    std::map<std::string, CheckpointZone> checkpointZones;
-    std::map<std::string, std::vector<CheckpointZone*>> savedCheckpoints;
-    std::map<int, std::vector<CheckpointZone*>> checkpoints;
+    /// The registered checkpoints this plug-in is keeping track of
+    std::map<std::string, CheckpointZone> registeredCheckpoints;
+
+    struct CheckpointRecord
+    {
+        std::string bzID = "";
+
+        /// The current checkpoint a player is assigned to spawn at
+        CheckpointZone* currentCheckpoint;
+
+        /// Checkpoints this player has reached
+        std::vector<CheckpointZone*> checkpoints;
+
+        /// The orientation the player was facing when they first landed
+        float azimuth = 0;
+
+        /// The saved position within this checkpoint
+        std::map<CheckpointZone*, float*> savedPositions;
+    };
+
+    /// A map to save checkpoint records between player joins indexed by BZID
+    std::map<std::string, CheckpointRecord> savedCheckpoints;
+
+    /// A map to store checkpoint records during a player's connected session indexed by playerID
+    std::map<int, CheckpointRecord> checkpoints;
 
     const char* bzdb_checkPointsLifetime = "_checkPointsLifetime";
     const char* bzdb_clearCheckPointsOnCap = "_clearCheckPointsOnCap";
@@ -97,6 +119,7 @@ void Checkpoint::Init(const char* /*config*/)
     Register(bz_ePlayerUpdateEvent);
 
     bz_registerCustomSlashCommand("checkpoints", this);
+    bz_registerCustomSlashCommand("cp", this);
 
     bz_registerCustomBZDBInt(bzdb_checkPointsLifetime, 60, 0, false);
     bz_registerCustomBZDBBool(bzdb_clearCheckPointsOnCap, false, 0, false);
@@ -109,8 +132,9 @@ void Checkpoint::Cleanup()
     Flush();
 
     bz_removeCustomSlashCommand("checkpoints");
+    bz_removeCustomSlashCommand("cp");
 
-    bz_removeCustomMapObject("checkpoint");
+    bz_removeCustomMapObject("CHECKPOINT");
 
     bz_removeCustomBZDBVariable(bzdb_checkPointsLifetime);
     bz_removeCustomBZDBVariable(bzdb_clearCheckPointsOnCap);
@@ -133,26 +157,36 @@ void Checkpoint::Event(bz_EventData* eventData)
         case bz_eGetPlayerSpawnPosEvent:
         {
             bz_GetPlayerSpawnPosEventData_V1* data = (bz_GetPlayerSpawnPosEventData_V1*)eventData;
+            CheckpointRecord* record = &checkpoints[data->playerID];
 
-            if (checkpoints[data->playerID].size() == 0)
+            // If the record for this player doesn't exist or they have not reached any checkpoints, don't try setting a
+            // spawn position for them
+            if (!record || record->checkpoints.size() == 0 || !record->currentCheckpoint)
             {
                 return;
             }
 
-            CheckpointZone* zone = checkpoints[data->playerID].at(checkpoints[data->playerID].size() - 1);
-
-            if (!zone)
-            {
-                return;
-            }
-
+            CheckpointZone* zone = record->currentCheckpoint;
             float pos[3];
-            bz_getSpawnPointWithin(zone, pos);
+
+            // If there's an explicitly saved position in this checkpoint, use it. Otherwise, pick a random spawn
+            // position within the zone each time.
+            if (record->savedPositions[zone])
+            {
+                pos[0] = record->savedPositions[zone][0];
+                pos[1] = record->savedPositions[zone][1];
+                pos[2] = record->savedPositions[zone][2];
+            }
+            else
+            {
+                bz_getSpawnPointWithin(zone, pos);
+            }
 
             data->handled = true;
             data->pos[0] = pos[0];
             data->pos[1] = pos[1];
             data->pos[2] = pos[2] + 0.001f; // Fudge the Z-value to avoid stickiness on objects
+            data->rot = record->azimuth; // Always spawn them facing the same direction as the first time
         }
         break;
 
@@ -164,13 +198,16 @@ void Checkpoint::Event(bz_EventData* eventData)
             // Only restore a player's last Checkpoint if they're registered
             if (data->record->verified)
             {
-                unsigned long index = savedCheckpoints[bzid].size();
-
-                if (index == 0) {
-                    return;
+                if (savedCheckpoints.find(bzid) != savedCheckpoints.end())
+                {
+                    checkpoints[data->playerID] = savedCheckpoints[bzid];
                 }
+            }
 
-                checkpoints[data->playerID] = savedCheckpoints[bzid];
+            if (checkpoints.find(data->playerID) == checkpoints.end())
+            {
+                checkpoints[data->playerID] = CheckpointRecord();
+                checkpoints[data->playerID].bzID = data->record->bzID;
             }
         }
         break;
@@ -192,26 +229,36 @@ void Checkpoint::Event(bz_EventData* eventData)
         {
             bz_PlayerUpdateEventData_V1* data = (bz_PlayerUpdateEventData_V1*)eventData;
 
-            for (auto &zone : checkpointZones)
+            // If they're falling, don't bother doing anything
+            if (data->state.falling)
             {
-                auto &myCheckpoints = checkpoints[data->playerID];
+                return;
+            }
 
+            for (auto &zone : registeredCheckpoints)
+            {
+                auto &myCheckpoints = checkpoints[data->playerID].checkpoints;
+
+                // If they're inside a checkpoint they're already been in before, don't do anything
                 if (std::count(myCheckpoints.begin(), myCheckpoints.end(), &zone.second))
                 {
-                    continue;
+                    break;
                 }
 
+                // They're now inside a checkpoint they're never been in
                 if (zone.second.pointInZone(data->state.pos))
                 {
                     bz_BasePlayerRecord *pr = bz_getPlayerByIndex(data->playerID);
 
-                    // If a Checkpoint is intended only for a team
+                    // If a checkpoint is intended only for a specific team color
                     if (zone.second.team_value != eNoTeam && pr->team != zone.second.team_value)
                     {
                         continue;
                     }
 
-                    checkpoints[data->playerID].push_back(&zone.second);
+                    checkpoints[data->playerID].checkpoints.push_back(&zone.second);
+                    checkpoints[data->playerID].currentCheckpoint = &zone.second;
+                    checkpoints[data->playerID].azimuth = data->state.rotation;
 
                     if (!zone.second.message_value.empty())
                     {
@@ -232,18 +279,94 @@ void Checkpoint::Event(bz_EventData* eventData)
 
 bool Checkpoint::SlashCommand(int playerID, bz_ApiString command, bz_ApiString /*message*/, bz_APIStringList *params)
 {
-    if (command == "checkpoints")
+    if (command == "checkpoints" || command == "cp")
     {
-        auto &myCheckpoints = checkpoints[playerID];
+        auto &playerCPs = checkpoints[playerID].checkpoints;
 
-        int max = std::min(10, (int)myCheckpoints.size());
-
-        bz_sendTextMessagef(BZ_SERVER, playerID, "Your Checkpoints");
-        bz_sendTextMessagef(BZ_SERVER, playerID, "----------------");
-
-        for (int i = 0; i < max; ++i)
+        if (params->get(0) == "list")
         {
-            bz_sendTextMessagef(BZ_SERVER, playerID, "  - %s", myCheckpoints.at(myCheckpoints.size() - 1 - i)->name_value.c_str());
+            // Only list a maximum of the 10 most recent checkpoints
+            int max = std::min(10, (int)playerCPs.size());
+
+            bz_sendTextMessagef(BZ_SERVER, playerID, "Your Checkpoints");
+            bz_sendTextMessagef(BZ_SERVER, playerID, "----------------");
+
+            for (int i = 0; i < max; ++i)
+            {
+                // The more recent checkpoints are always appended
+                CheckpointZone* cp = playerCPs.at(playerCPs.size() - 1 - i);
+                bool isSelected = (cp == checkpoints[playerID].currentCheckpoint);
+
+                bz_sendTextMessagef(BZ_SERVER, playerID, "  %s %s", cp->name_value.c_str(), isSelected ? "*" : "-");
+            }
+        }
+        else if (params->get(0) == "save")
+        {
+            bz_BasePlayerRecord* pr = bz_getPlayerByIndex(playerID);
+            bool locationSaved = false;
+
+            // Get the player's current position to make sure they're inside a checkpoint
+            float currPos[3];
+            currPos[0] = pr->lastKnownState.pos[0];
+            currPos[1] = pr->lastKnownState.pos[1];
+            currPos[2] = pr->lastKnownState.pos[2];
+
+            for (auto &zone : playerCPs)
+            {
+                if (zone->pointInZone(currPos))
+                {
+                    checkpoints[playerID].savedPositions[zone][0] = currPos[0];
+                    checkpoints[playerID].savedPositions[zone][1] = currPos[1];
+                    checkpoints[playerID].savedPositions[zone][2] = currPos[2];
+                    checkpoints[playerID].azimuth = pr->lastKnownState.rotation;
+
+                    bz_sendTextMessagef(BZ_SERVER, playerID, "You have changed your default spawn location:");
+                    bz_sendTextMessagef(BZ_SERVER, playerID, "  Next spawn will be be at this position.");
+
+                    locationSaved = true;
+
+                    break;
+                }
+            }
+
+            if (!locationSaved)
+            {
+                bz_sendTextMessagef(BZ_SERVER, playerID, "You are not currently inside of a checkpoint.");
+            }
+
+            bz_freePlayerRecord(pr);
+        }
+        else if (params->get(0) == "swap")
+        {
+            if (params->size() != 2)
+            {
+                bz_sendTextMessagef(BZ_SERVER, playerID, "Syntax: /%s swap \"<checkpoint name>\"", command.c_str());
+                return true;
+            }
+
+            bz_ApiString targetCheckpoint = bz_tolower(params->get(1).c_str());
+            bool locationSaved = false;
+
+            for (auto &zone : playerCPs)
+            {
+                bz_ApiString zoneName = bz_tolower(zone->name_value.c_str());
+
+                if (targetCheckpoint == zoneName)
+                {
+                    checkpoints[playerID].currentCheckpoint = zone;
+                    locationSaved = true;
+
+                    bz_sendTextMessagef(BZ_SERVER, playerID, "You have changed your default checkpoint:");
+                    bz_sendTextMessagef(BZ_SERVER, playerID, "  Next spawn will be at: %s", zone->name_value.c_str());
+
+                    break;
+                }
+            }
+
+            if (!locationSaved)
+            {
+                bz_sendTextMessagef(BZ_SERVER, playerID, "The checkpoint \"%s\" does not exist or you have not reached it yet.", targetCheckpoint.c_str());
+            }
         }
 
         return true;
@@ -289,9 +412,9 @@ bool Checkpoint::MapObject(bz_ApiString object, bz_CustomMapObjectInfo* data)
         }
     }
 
-    if (checkpointZones.find(checkpointZone.name_value) == checkpointZones.end())
+    if (registeredCheckpoints.find(checkpointZone.name_value) == registeredCheckpoints.end())
     {
-        checkpointZones[checkpointZone.name_value] = checkpointZone;
+        registeredCheckpoints[checkpointZone.name_value] = checkpointZone;
     }
     else
     {
