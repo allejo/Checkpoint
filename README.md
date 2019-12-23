@@ -1,7 +1,7 @@
 # Checkpoint
 
 [![GitHub release](https://img.shields.io/github/release/allejo/Checkpoint.svg)](https://github.com/allejo/Checkpoint/releases/latest)
-![Minimum BZFlag Version](https://img.shields.io/badge/BZFlag-v2.4.0+-blue.svg)
+![Minimum BZFlag Version](https://img.shields.io/badge/BZFlag-v2.4.20+-blue.svg)
 [![License](https://img.shields.io/github/license/allejo/Checkpoint.svg)](LICENSE.md)
 
 This is a rewrite of the [original Checkpoint](https://forums.bzflag.org/viewtopic.php?f=79&t=16273&p=158192) plug-in that is used on obstacle course like maps to allow players to save their spawn positions.
