@@ -121,7 +121,7 @@ void Checkpoint::Init(const char* /*config*/)
     bz_registerCustomSlashCommand("checkpoints", this);
     bz_registerCustomSlashCommand("cp", this);
 
-    bz_registerCustomBZDBInt(bzdb_checkPointsLifetime, 60, 0, false);
+    bz_registerCustomBZDBInt(bzdb_checkPointsLifetime, 5, 0, false);
     bz_registerCustomBZDBBool(bzdb_clearCheckPointsOnCap, false, 0, false);
 
     bz_registerCustomMapObject("CHECKPOINT", this);
