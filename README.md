@@ -1,4 +1,4 @@
-# Plugin Name
+# Checkpoint
 
 [![GitHub release](https://img.shields.io/github/release/allejo/Checkpoint.svg)](https://github.com/allejo/Checkpoint/releases/latest)
 ![Minimum BZFlag Version](https://img.shields.io/badge/BZFlag-v2.4.0+-blue.svg)
