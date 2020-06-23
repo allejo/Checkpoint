@@ -32,8 +32,8 @@ const std::string PLUGIN_NAME = "Checkpoint";
 const int MAJOR = 1;
 const int MINOR = 0;
 const int REV = 0;
-const int BUILD = 2;
-const std::string SUFFIX = "DEV";
+const int BUILD = 8;
+const std::string SUFFIX = "STABLE";
 
 // Define build settings
 const int VERBOSITY_LEVEL = 4;
